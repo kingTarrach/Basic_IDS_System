@@ -1,17 +1,13 @@
-from scapy.all import sniff, IP
-from collections import Counter
-import time
-import joblib
+import pyshark
 import pandas as pd
+import time
+from collections import Counter
+from ML_algorithm import model as intrusion_model, vectorizer
+
+
 
 # Configuration
 MONITOR_INTERFACE = "enp0s3"  # My network interface
-PACKET_THRESHOLD = 100         # Max packets allowed per IP in TIME_WINDOW
-TIME_WINDOW = 5               # Time window in seconds for counting packets
-
-# Import ML model and vectorizer
-intrusion_model = joblib.load("network_anomaly_detector.pkl")
-vectorizer = joblib.load("info_vectorizer.pkl")
 
 # Packet statistics
 packet_counts = Counter()
@@ -28,52 +24,43 @@ def predict_network_activity(new_data):
     int: 1 for malicious, 0 for normal.
     """    
     
-    # Process 'Info' column using the saved vectorizer
-    info_tfidf = vectorizer.transform(new_data["Info"].fillna("")).toarray()
-    
-    # One-hot encode Protocol column
-    new_data = pd.get_dummies(new_data, columns=["Protocol"], drop_first=True)
-    
-    # Combine processed features
-    X_new = pd.concat(
-        [pd.DataFrame(info_tfidf, columns=vectorizer.get_feature_names_out()), 
-         new_data[["Length"]], 
-         new_data.filter(regex="Protocol_")],
-        axis=1
-    )
-    
-    # Handle missing columns (fill with 0)
-    expected_features = intrusion_model.feature_importances_.shape[0]
-    X_new = X_new.reindex(columns=intrusion_model.feature_names_in_, fill_value=0)
-    
-    # Predict anomalies
-    prediction = intrusion_model.predict(X_new)[0]
-    
-    return prediction
+    # Rule 1: Label ICMP traffic with "Destination unreachable" as Anomalous
+    if (new_data["Protocol"] == "ICMP") and ("Destination unreachable" in new_data["Info"]):
+        return 1  # Malicious
+
+    # Rule 2: Label DNS traffic with "Unknown operation" as Anomalous
+    if (new_data["Protocol"] == "DNS") and ("Unknown operation" in new_data["Info"]):
+        return 1  # Malicious
+
+    # Rule 3: Label ICMP traffic with "no response found!" as Anomalous
+    if (new_data["Protocol"] == "ICMP") and ("no response found!" in new_data["Info"]):
+        return 1  # Malicious
+
+    # If none of the rules match, label as Normal
+    return 0  # Normal
 
 def process_packet(packet):
     """
-    Processes a sniffed packet and checks for malicious activity using the ML model.
+    Processes a sniffed packet using pyshark and checks for malicious activity using the ML model.
     """
+
     try:
         # Extract packet details
-        protocol = packet[IP].proto if IP in packet else "Unknown"
-        info = f"Packet from {packet[IP].src} to {packet[IP].dst}" if IP in packet else "Unknown Info"
-        length = len(packet)
+        protocol = packet.highest_layer
+        info = f"Packet from {packet.ip.src} to {packet.ip.dst}" if hasattr(packet, "ip") else "Unknown Info"
+        length = int(packet.length) if hasattr(packet, "length") else 0
 
-        # Create a DataFrame for prediction
-        packet_data = pd.DataFrame([{
-            "Info": info,
-            "Length": length,
-            "Protocol": protocol
-        }])
+        # Create a single data point as a dictionary
+        packet_data = {"Info": info, "Length": length, "Protocol": protocol}
 
-        # Get prediction
+        # Get prediction (1 for malicious, 0 for normal)
         prediction = predict_network_activity(packet_data)
 
         # Print only if malicious
         if prediction == 1:
             print("Malicious activity detected!")
+        else:
+            print("Normal activity.")
 
     except Exception as e:
         print(f"Error processing packet: {e}")
@@ -84,17 +71,66 @@ def start_sniffing():
     detection function for each captured packet.
     """
     print(f"Starting packet capture on interface {MONITOR_INTERFACE}...")
-    sniff(iface=MONITOR_INTERFACE, filter="ip", prn=process_packet)
+    try:
+        # Create a live capture object
+        capture = pyshark.LiveCapture(interface=MONITOR_INTERFACE, debug=True)
+
+        # Sniff packets continuously
+        print("Hello")
+        for packet in capture.sniff_continuously():
+            try:
+                if packet:
+                    process_packet(packet)  # Process packets if captured
+                else:
+                    print("No packets captured yet...")
+            except Exception as packet_error:
+                print(f"Error processing packet: {packet_error}")
+    except Exception as e:
+        print(f"Error during sniffing: {e}")
+
+def simulate_attacks():
+    # ICMP Flood Attack DataFrame
+    icmp_flood_data = [
+        {"Info": "Destination unreachable", "Length": 120, "Protocol": "ICMP"},
+        {"Info": "Destination unreachable", "Length": 120, "Protocol": "ICMP"},
+        {"Info": "Destination unreachable", "Length": 120, "Protocol": "ICMP"},
+    ]
+
+    # SYN Flood Attack DataFrame
+    syn_flood_data = [
+        {"Info": "Unknown operation", "Length": 64, "Protocol": "TCP"},
+        {"Info": "Unknown operation", "Length": 64, "Protocol": "TCP"},
+        {"Info": "Unknown operation", "Length": 64, "Protocol": "TCP"},
+    ]
+
+    # UDP Flood Attack DataFrame
+    udp_flood_data = [
+        {"Info": "no response found!", "Length": 120, "Protocol": "UDP"},
+        {"Info": "no response found!", "Length": 120, "Protocol": "UDP"},
+        {"Info": "no response found!", "Length": 120, "Protocol": "UDP"},
+    ]
+
+    # ICMP Flood Predictions
+    print("ICMP Flood Predictions:")
+    for packet in icmp_flood_data:
+        prediction = predict_network_activity(packet)
+        print(f"Prediction: {'Malicious' if prediction == 1 else 'Normal'}")
+
+    # SYN Flood Predictions
+    print("\nSYN Flood Predictions:")
+    for packet in syn_flood_data:
+        prediction = predict_network_activity(packet)
+        print(f"Prediction: {'Malicious' if prediction == 1 else 'Normal'}")
+
+    # UDP Flood Predictions
+    print("\nUDP Flood Predictions:")
+    for packet in udp_flood_data:
+        prediction = predict_network_activity(packet)
+        print(f"Prediction: {'Malicious' if prediction == 1 else 'Normal'}")
+
 
 if __name__ == "__main__":
-    new_data = pd.DataFrame({
-    "Info": ["Destination Unreachable"],
-    "Length": [128],
-    "Protocol": ["ICMP"]
-    })
-
-    classification = predict_network_activity(new_data)
-    print(f"Classification: {'Malicious' if classification == 1 else 'Normal'}")
+    simulate_attacks()
     try:
         start_sniffing()
     except KeyboardInterrupt:

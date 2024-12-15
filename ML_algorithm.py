@@ -71,14 +71,10 @@ sns.heatmap(confusion_matrix(y_test, y_pred), annot=True, fmt="d", cmap="Blues",
 plt.title("Confusion Matrix")
 plt.xlabel("Predicted")
 plt.ylabel("Actual")
-plt.show()
+# plt.show()
 
 #
 #   Save the model
 # 
 
-# Save model itself
-joblib.dump(model, "network_anomaly_detector.pkl")
 
-# Save vectorizer
-joblib.dump(vectorizer, "info_vectorizer.pkl")
